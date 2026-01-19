@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS "Lebedinskiy_2272".status (
 -- Таблица projects (Проекты)
 CREATE TABLE IF NOT EXISTS "Lebedinskiy_2272".projects (
     project_id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".users(user_id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".users(user_id),
     project_name VARCHAR(255) NOT NULL,
     description VARCHAR(255),
     creation_date DATE DEFAULT CURRENT_DATE
@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS "Lebedinskiy_2272".projects (
 -- Таблица tasks (Задачи)
 CREATE TABLE IF NOT EXISTS "Lebedinskiy_2272".tasks (
     task_id SERIAL PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".projects(project_id) ON DELETE CASCADE,
-    user_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".users(user_id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".projects(project_id),
+    user_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".users(user_id),
     title VARCHAR(255) NOT NULL,
     description VARCHAR(255),
     status_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".status(status_id) ON DELETE RESTRICT,
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS "Lebedinskiy_2272".tasks (
 -- Таблица reminders (Напоминания)
 CREATE TABLE IF NOT EXISTS "Lebedinskiy_2272".reminders (
     reminder_id SERIAL PRIMARY KEY,
-    task_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".tasks(task_id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL REFERENCES "Lebedinskiy_2272".tasks(task_id),
     reminder_time TIMESTAMP NOT NULL,
     type VARCHAR(50),
     status VARCHAR(50)
@@ -170,22 +170,22 @@ SELECT * FROM "Lebedinskiy_2272".vw_full_task_info LIMIT 10;
 ```sql
 CREATE OR REPLACE FUNCTION "Lebedinskiy_2272".get_tasks_sorted_by_priority()
 RETURNS TABLE (
-    "пользователь" TEXT,
-    "проект" TEXT,
-    "задача" TEXT,
-    "статус" TEXT,
-    "приоритет" TEXT,
-    "срок" DATE
+    user_name TEXT,
+    project_name TEXT,
+    task_title TEXT,
+    status_name TEXT,
+    priority_name TEXT,
+    due_date DATE
 )
 LANGUAGE SQL
 AS $$
     SELECT
-        "пользователь",
-        "проект",
-        "задача",
-        "статус",
-        "приоритет",
-        "срок"
+        "пользователь" AS user_name,
+        "проект" AS project_name,
+        "задача" AS task_title,
+        "статус" AS status_name,
+        "приоритет" AS priority_name,
+        "срок" AS due_date
     FROM "Lebedinskiy_2272".vw_full_task_info
     ORDER BY 
         CASE "приоритет"
@@ -215,17 +215,18 @@ INSERT INTO "Lebedinskiy_2272".users (name, email, password_hash)
 SELECT 
     'Пользователь ' || i,
     'user' || i || '@example.com',
-    md5(random()::text)
-FROM generate_series(5, 100) AS i
+    md5(random()::text || i::text)
+FROM generate_series(5, 500) AS i
 ON CONFLICT (email) DO NOTHING;
 
 -- Добавляем больше проектов
 INSERT INTO "Lebedinskiy_2272".projects (user_id, project_name, description)
 SELECT 
-    (random() * 96 + 1)::INT + 1,  -- Выбираем случайного пользователя из 1-100
-    'Проект ' || i,
+    (random() * 499 + 1)::INT,
+    'Проект_' || i,
     'Тестовый проект #' || i
-FROM generate_series(5, 50) AS i;
+FROM generate_series(5, 200) AS i
+ON CONFLICT DO NOTHING;
 ```
 
 ### Генерация тестовых данных (20 000 записей)
@@ -235,15 +236,21 @@ INSERT INTO "Lebedinskiy_2272".tasks (
     status_id, priority_id, due_date, creation_date
 )
 SELECT
-    (SELECT project_id FROM "Lebedinskiy_2272".projects ORDER BY random() LIMIT 1),
-    (SELECT user_id FROM "Lebedinskiy_2272".users ORDER BY random() LIMIT 1),
-    'Автозадача #' || gs.i,
-    'Тестовое описание для задачи #' || gs.i,
-    (SELECT status_id FROM "Lebedinskiy_2272".status ORDER BY random() LIMIT 1),
-    (SELECT priority_id FROM "Lebedinskiy_2272".priority ORDER BY random() LIMIT 1),
+    p.project_id,
+    p.user_id,
+    'Задача_' || gs.i,
+    'Описание задачи #' || gs.i || ' для проекта ' || p.project_name,
+    (ARRAY[1,2,3,4])[FLOOR(random() * 4 + 1)::INT],
+    (ARRAY[1,2,3,4])[FLOOR(random() * 4 + 1)::INT],
     CURRENT_DATE + (random() * 180)::INT,
     CURRENT_DATE - (random() * 365)::INT
-FROM generate_series(1, 20000) AS gs(i);
+FROM generate_series(1, 20000) AS gs(i)
+JOIN LATERAL (
+    SELECT project_id, user_id 
+    FROM "Lebedinskiy_2272".projects 
+    ORDER BY random() 
+    LIMIT 1
+) p ON true;
 ```
 
 ### Анализ плана выполнения
@@ -262,10 +269,19 @@ ORDER BY "кол_во_задач" DESC;
 
 ### Создание индексов для оптимизации
 ```sql
-CREATE INDEX CONCURRENTLY idx_tasks_creation_date ON "Lebedinskiy_2272".tasks (creation_date);
-CREATE INDEX CONCURRENTLY idx_tasks_priority_id ON "Lebedinskiy_2272".tasks (priority_id);
-CREATE INDEX CONCURRENTLY idx_tasks_due_date ON "Lebedinskiy_2272".tasks (due_date);
-CREATE INDEX CONCURRENTLY idx_reminders_time ON "Lebedinskiy_2272".reminders (reminder_time);
+-- Удаляем избыточные индексы
+DROP INDEX IF EXISTS "Lebedinskiy_2272".idx_tasks_priority_id;
+DROP INDEX IF EXISTS "Lebedinskiy_2272".idx_tasks_creation_date;
+
+-- Создаем составные индексы
+CREATE INDEX CONCURRENTLY idx_tasks_creation_priority 
+ON "Lebedinskiy_2272".tasks (creation_date, priority_id);
+
+CREATE INDEX CONCURRENTLY idx_tasks_due_date_status 
+ON "Lebedinskiy_2272".tasks (due_date, status_id);
+
+CREATE INDEX CONCURRENTLY idx_reminders_time_status 
+ON "Lebedinskiy_2272".reminders (reminder_time, status);
 ```
 
 ## Лабораторная работа 5. Триггеры и аудит
@@ -274,8 +290,8 @@ CREATE INDEX CONCURRENTLY idx_reminders_time ON "Lebedinskiy_2272".reminders (re
 CREATE TABLE IF NOT EXISTS "Lebedinskiy_2272".audit (
     audit_id SERIAL PRIMARY KEY,
     table_name TEXT NOT NULL,
-    operation TEXT NOT NULL CHECK (operation IN ('INSERT','UPDATE','DELETE','DELETE (cascade)')),
-    record_id TEXT,  -- Изменено с INT на TEXT для поддержки UUID и других типов
+    operation TEXT NOT NULL CHECK (operation IN ('INSERT','UPDATE','DELETE','DELETE (cascade)','DELETE (initiator)')),
+    record_id TEXT,
     old_values JSONB,
     new_values JSONB,
     changed_by TEXT NOT NULL DEFAULT CURRENT_USER,
@@ -287,13 +303,14 @@ CREATE INDEX CONCURRENTLY idx_audit_operation ON "Lebedinskiy_2272".audit (opera
 CREATE INDEX CONCURRENTLY idx_audit_time ON "Lebedinskiy_2272".audit (changed_at);
 ```
 
-### Универсальная функция аудита
+### Универсальная функция аудита с поддержкой каскадных операций
 ```sql
 CREATE OR REPLACE FUNCTION "Lebedinskiy_2272".audit_log_universal()
 RETURNS TRIGGER AS $$
 DECLARE
     pk_column_name TEXT;
     pk_value TEXT;
+    operation_type TEXT := TG_OP;
 BEGIN
     -- Получаем имя первичного ключа таблицы
     SELECT a.attname INTO pk_column_name
@@ -304,6 +321,17 @@ BEGIN
 
     IF pk_column_name IS NULL THEN
         RAISE EXCEPTION 'Primary key not found for table %', TG_TABLE_NAME;
+    END IF;
+
+    -- Проверяем, является ли операция частью каскадного удаления
+    IF TG_OP = 'DELETE' THEN
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint 
+            WHERE conrelid = TG_RELID 
+            AND contype = 'f'
+        ) THEN
+            operation_type := 'DELETE (cascade)';
+        END IF;
     END IF;
 
     -- Получаем значение первичного ключа
@@ -318,7 +346,7 @@ BEGIN
         table_name, operation, record_id, old_values, new_values, changed_by
     ) VALUES (
         TG_TABLE_NAME,
-        TG_OP,
+        operation_type,
         pk_value,
         CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN to_jsonb(OLD) END,
         CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN to_jsonb(NEW) END,
@@ -330,9 +358,123 @@ END;
 $$ LANGUAGE plpgsql;
 ```
 
+### Триггеры каскадного удаления
+
+#### 1. Триггер для каскадного удаления задач при удалении проекта
+```sql
+CREATE OR REPLACE FUNCTION "Lebedinskiy_2272".cascade_delete_project_tasks()
+RETURNS TRIGGER AS $$
+DECLARE
+    task_rec RECORD;
+BEGIN
+    -- Логируем начало каскадного удаления
+    INSERT INTO "Lebedinskiy_2272".audit (table_name, operation, record_id, changed_by)
+    VALUES ('projects', 'DELETE (initiator)', OLD.project_id::TEXT, CURRENT_USER);
+
+    -- Удаляем все связанные задачи и их напоминания
+    FOR task_rec IN 
+        SELECT task_id FROM "Lebedinskiy_2272".tasks 
+        WHERE project_id = OLD.project_id
+    LOOP
+        -- Сначала удаляем напоминания для задачи
+        DELETE FROM "Lebedinskiy_2272".reminders 
+        WHERE task_id = task_rec.task_id;
+        
+        -- Логируем удаление напоминаний
+        INSERT INTO "Lebedinskiy_2272".audit (table_name, operation, record_id, changed_by)
+        SELECT 'reminders', 'DELETE (cascade)', reminder_id::TEXT, CURRENT_USER
+        FROM "Lebedinskiy_2272".reminders 
+        WHERE task_id = task_rec.task_id;
+        
+        -- Логируем удаление задачи
+        INSERT INTO "Lebedinskiy_2272".audit (table_name, operation, record_id, changed_by)
+        VALUES ('tasks', 'DELETE (cascade)', task_rec.task_id::TEXT, CURRENT_USER);
+    END LOOP;
+    
+    -- Удаляем задачи
+    DELETE FROM "Lebedinskiy_2272".tasks 
+    WHERE project_id = OLD.project_id;
+    
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_cascade_delete_project
+BEFORE DELETE ON "Lebedinskiy_2272".projects
+FOR EACH ROW EXECUTE FUNCTION "Lebedinskiy_2272".cascade_delete_project_tasks();
+```
+
+#### 2. Триггер для каскадного удаления напоминаний при удалении задачи
+```sql
+CREATE OR REPLACE FUNCTION "Lebedinskiy_2272".cascade_delete_task_reminders()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Удаляем все связанные напоминания
+    DELETE FROM "Lebedinskiy_2272".reminders 
+    WHERE task_id = OLD.task_id;
+    
+    -- Логируем удаление напоминаний
+    INSERT INTO "Lebedinskiy_2272".audit (table_name, operation, record_id, changed_by)
+    SELECT 'reminders', 'DELETE (cascade)', reminder_id::TEXT, CURRENT_USER
+    FROM "Lebedinskiy_2272".reminders 
+    WHERE task_id = OLD.task_id;
+    
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_cascade_delete_task
+BEFORE DELETE ON "Lebedinskiy_2272".tasks
+FOR EACH ROW EXECUTE FUNCTION "Lebedinskiy_2272".cascade_delete_task_reminders();
+```
+
+#### 3. Триггер для каскадного удаления проектов и задач при удалении пользователя
+```sql
+CREATE OR REPLACE FUNCTION "Lebedinskiy_2272".cascade_delete_user_projects()
+RETURNS TRIGGER AS $$
+DECLARE
+    proj_rec RECORD;
+BEGIN
+    -- Логируем начало каскадного удаления
+    INSERT INTO "Lebedinskiy_2272".audit (table_name, operation, record_id, changed_by)
+    VALUES ('users', 'DELETE (initiator)', OLD.user_id::TEXT, CURRENT_USER);
+
+    -- Удаляем все проекты пользователя
+    FOR proj_rec IN 
+        SELECT project_id FROM "Lebedinskiy_2272".projects 
+        WHERE user_id = OLD.user_id
+    LOOP
+        -- Сначала удаляем задачи проекта (это вызовет каскадное удаление напоминаний)
+        DELETE FROM "Lebedinskiy_2272".tasks 
+        WHERE project_id = proj_rec.project_id;
+        
+        -- Логируем удаление проекта
+        INSERT INTO "Lebedinskiy_2272".audit (table_name, operation, record_id, changed_by)
+        VALUES ('projects', 'DELETE (cascade)', proj_rec.project_id::TEXT, CURRENT_USER);
+    END LOOP;
+    
+    -- Удаляем проекты
+    DELETE FROM "Lebedinskiy_2272".projects 
+    WHERE user_id = OLD.user_id;
+    
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_cascade_delete_user
+BEFORE DELETE ON "Lebedinskiy_2272".users
+FOR EACH ROW EXECUTE FUNCTION "Lebedinskiy_2272".cascade_delete_user_projects();
+```
+
 ### Триггеры аудита для всех основных таблиц
 ```sql
--- Триггеры для основных таблиц
+-- Удаляем старые триггеры, если они существуют
+DROP TRIGGER IF EXISTS trg_audit_users ON "Lebedinskiy_2272".users;
+DROP TRIGGER IF EXISTS trg_audit_projects ON "Lebedinskiy_2272".projects;
+DROP TRIGGER IF EXISTS trg_audit_tasks ON "Lebedinskiy_2272".tasks;
+DROP TRIGGER IF EXISTS trg_audit_reminders ON "Lebedinskiy_2272".reminders;
+
+-- Создаем новые триггеры после каскадных
 CREATE TRIGGER trg_audit_users
 AFTER INSERT OR UPDATE OR DELETE ON "Lebedinskiy_2272".users
 FOR EACH ROW EXECUTE FUNCTION "Lebedinskiy_2272".audit_log_universal();
@@ -352,37 +494,57 @@ FOR EACH ROW EXECUTE FUNCTION "Lebedinskiy_2272".audit_log_universal();
 
 ### Проверка аудита
 ```sql
--- Тестовые операции
-INSERT INTO "Lebedinskiy_2272".projects (user_id, project_name) 
-VALUES (1, 'Тестовый проект');
-
-INSERT INTO "Lebedinskiy_2272".tasks (project_id, user_id, title, status_id, priority_id, due_date)
-VALUES (
-    currval('"Lebedinskiy_2272".projects_project_id_seq'), 
-    1, 
-    'Тестовая задача', 
-    1, 
-    1, 
-    CURRENT_DATE + 1
-);
-
-INSERT INTO "Lebedinskiy_2272".reminders (task_id, reminder_time, type, status)
-VALUES (
-    currval('"Lebedinskiy_2272".tasks_task_id_seq'), 
-    CURRENT_TIMESTAMP + INTERVAL '1 day', 
-    'Push', 
-    'Активно'
-);
-
-UPDATE "Lebedinskiy_2272".tasks 
-SET title = 'Обновленная задача' 
-WHERE task_id = currval('"Lebedinskiy_2272".tasks_task_id_seq');
-
-DELETE FROM "Lebedinskiy_2272".projects 
-WHERE project_name = 'Тестовый проект';
+-- Подготовка тестовых данных
+DO $$
+DECLARE
+    test_user_id INTEGER;
+    test_project_id INTEGER;
+    test_task_id INTEGER;
+BEGIN
+    -- Создаем тестового пользователя
+    INSERT INTO "Lebedinskiy_2272".users (name, email, password_hash)
+    VALUES ('Тестовый пользователь', 'test@example.com', 'test_hash')
+    RETURNING user_id INTO test_user_id;
+    
+    -- Создаем тестовый проект
+    INSERT INTO "Lebedinskiy_2272".projects (user_id, project_name, description)
+    VALUES (test_user_id, 'Тестовый проект', 'Описание проекта')
+    RETURNING project_id INTO test_project_id;
+    
+    -- Создаем тестовую задачу
+    INSERT INTO "Lebedinskiy_2272".tasks (project_id, user_id, title, description, status_id, priority_id, due_date)
+    VALUES (
+        test_project_id, 
+        test_user_id, 
+        'Тестовая задача', 
+        'Описание задачи',
+        1, 1, 
+        CURRENT_DATE + 1
+    )
+    RETURNING task_id INTO test_task_id;
+    
+    -- Создаем напоминание для задачи
+    INSERT INTO "Lebedinskiy_2272".reminders (task_id, reminder_time, type, status)
+    VALUES (
+        test_task_id,
+        CURRENT_TIMESTAMP + INTERVAL '1 day',
+        'Push',
+        'Активно'
+    );
+    
+    -- Выполняем каскадное удаление пользователя
+    DELETE FROM "Lebedinskiy_2272".users 
+    WHERE user_id = test_user_id;
+END $$;
 
 -- Просмотр записей аудита
-SELECT * FROM "Lebedinskiy_2272".audit 
+SELECT 
+    table_name,
+    operation,
+    record_id,
+    changed_at,
+    changed_by
+FROM "Lebedinskiy_2272".audit 
 ORDER BY changed_at DESC 
-LIMIT 10;
+LIMIT 20;
 ```
